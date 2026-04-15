@@ -1,9 +1,12 @@
 import json
+import logging
 import os
 from datetime import datetime
 
 import streamlit as st
-from openai import OpenAI
+from openai import APIError, APITimeoutError, OpenAI, RateLimitError
+
+logger = logging.getLogger("streamlit_app")
 
 
 st.set_page_config(
@@ -190,28 +193,49 @@ if prompt:
     if client:
         response_placeholder = st.empty()
         assembled = ""
-        with st.spinner("Thinking..."):
-            stream = client.chat.completions.create(
-                model=model,
-                messages=conversation_for_model(),
-                temperature=st.session_state.temperature,
-                top_p=st.session_state.top_p,
-                max_tokens=st.session_state.max_tokens,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    assembled += delta
-                    response_placeholder.markdown(
-                        f"""
-                        <div class="chat-shell chat-assistant">
-                            <div class="chat-role">assistant</div>
-                            <div>{assembled}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+        try:
+            with st.spinner("Thinking..."):
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=conversation_for_model(),
+                    temperature=st.session_state.temperature,
+                    top_p=st.session_state.top_p,
+                    max_tokens=st.session_state.max_tokens,
+                    stream=True,
+                )
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        assembled += delta
+                        response_placeholder.markdown(
+                            f"""
+                            <div class="chat-shell chat-assistant">
+                                <div class="chat-role">assistant</div>
+                                <div>{assembled}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+        except RateLimitError as exc:
+            logger.warning("OpenAI rate limit: %s", exc)
+            st.error("The API rate limit was hit. Wait a moment and try again.")
+            assembled = ""
+        except APITimeoutError as exc:
+            logger.warning("OpenAI timeout: %s", exc)
+            st.error("The request timed out. Try again with a shorter message or lower max tokens.")
+            assembled = ""
+        except APIError as exc:
+            logger.exception("OpenAI API error")
+            st.error(f"API error: {exc}")
+            assembled = assembled or ""
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.exception("Network or parse error during chat")
+            st.error("Something went wrong while talking to the model. Check your connection and try again.")
+            assembled = assembled or ""
+        except Exception as exc:
+            logger.exception("Unexpected error during chat completion")
+            st.error(f"Unexpected error: {exc}")
+            assembled = assembled or ""
 
         st.session_state.conversations[st.session_state.active_chat].append(
             {"role": "assistant", "content": assembled}
